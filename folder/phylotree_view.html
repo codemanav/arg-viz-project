@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>D3 Local Trees (ARG → Local Phylograms)</title>
+<script src="https://unpkg.com/d3@7"></script>
+<style>
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#fafafa; }
+  header { padding:12px 16px; border-bottom:1px solid #e5e7eb; background:#fff; position:sticky; top:0; z-index:10; }
+  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .badge { background:#111827; color:#fff; padding:4px 8px; border-radius:999px; font-size:12px; }
+  #viz { width:100vw; height: calc(100vh - 76px); }
+  svg { width:100%; height:100%; display:block; background:#ffffff; }
+  .link { fill:none; stroke:#9ca3af; stroke-width:1.5px; }
+  .node circle { fill:#1f2937; r:3; }
+  .tip text { font-size:12px; dominant-baseline:middle; }
+  .axis text { font-size:11px; fill:#6b7280; }
+  .axis line, .axis path { stroke:#e5e7eb; }
+  .controls { margin-left:auto; display:flex; align-items:center; gap:10px; }
+  input[type="range"] { width:260px; }
+  .interval { color:#374151; font-weight:600; }
+</style>
+</head>
+<body>
+<header class="row">
+  <div class="row">
+    <span class="badge">Local Trees</span>
+    <span id="which" class="interval"></span>
+  </div>
+  <div class="controls">
+    <label for="slider">Genomic position</label>
+    <input id="slider" type="range" min="0" value="0" step="1"/>
+    <span id="posLabel" class="interval"></span>
+  </div>
+</header>
+
+<div id="viz"></div>
+
+<script>
+(async function () {
+  // ---- Load all local trees from manifest ----
+  const trees = await fetch("trees.json").then(r => r.json());
+
+  if (!Array.isArray(trees) || trees.length === 0) {
+    document.getElementById('viz').innerHTML = "<p style='padding:16px'>No trees.json or it's empty.</p>";
+    return;
+  }
+
+  // ---- Slider config ----
+  const slider = document.getElementById("slider");
+  const which  = document.getElementById("which");
+  const posLabel = document.getElementById("posLabel");
+  slider.max = String(trees.length - 1);
+  updateHeader(0);
+
+  // ---- SVG canvas ----
+  const container = document.getElementById("viz");
+  const svg = d3.select(container).append("svg");
+  const g = svg.append("g").attr("transform", "translate(60,20)"); // margins
+
+  // Handle resize
+  function size() {
+    const w = container.clientWidth || window.innerWidth;
+    const h = container.clientHeight || (window.innerHeight - 76);
+    svg.attr("width", w).attr("height", h);
+    return { w, h, innerW: w - 100, innerH: h - 60 };
+  }
+
+  // ---- Newick parser (tiny, D3-friendly) ----
+  function parseNewick(s) {
+    let tokens = s.trim().replace(/\s+/g, "").split(/(?=[(),:;])|(?<=[(),:;])/);
+    let i = 0;
+    function eat(expected) {
+      const t = tokens[i++];
+      if (expected && t !== expected) throw new Error(`Expected '${expected}', got '${t}'`);
+      return t;
+    }
+    function parseSubtree() {
+      let node = { name: "", length: 0, children: [] };
+      if (tokens[i] === "(") {
+        eat("(");
+        node.children.push(parseSubtree());
+        while (tokens[i] === ",") { eat(","); node.children.push(parseSubtree()); }
+        eat(")");
+      } else {
+        // tip name
+        let name = "";
+        while (i < tokens.length && !",):;".includes(tokens[i])) name += tokens[i++];
+        node.name = name || "";
+      }
+      if (tokens[i] === ":") {
+        eat(":");
+        // read branch length (float)
+        let num = "";
+        while (i < tokens.length && !",);".includes(tokens[i])) num += tokens[i++];
+        node.length = +num;
+      }
+      return node;
+    }
+    const root = parseSubtree();
+    eat(";");
+    // D3 hierarchy expects undefined for leaves' children
+    (function clean(n) {
+      if (!n.children || n.children.length === 0) delete n.children;
+      else n.children.forEach(clean);
+    })(root);
+    return root;
+  }
+
+  // ---- Compute cumulative x (branch-length) like a phylogram ----
+  function addCumulativeLength(node, parentLength = 0) {
+    node.cum = (node.length || 0) + parentLength;
+    if (node.children) node.children.forEach(c => addCumulativeLength(c, node.cum));
+  }
+
+  function getMaxCum(node) {
+    let m = node.cum || 0;
+    if (node.children) node.children.forEach(c => m = Math.max(m, getMaxCum(c)));
+    return m;
+  }
+
+  // ---- Render one tree ----
+  function renderTree(idx) {
+    const { w, h, innerW, innerH } = size();
+    g.selectAll("*").remove();
+
+    const tinfo = trees[idx];
+    const rootData = parseNewick(tinfo.newick);
+    // D3 hierarchy & tidy layout (vertical spacing)
+    const root = d3.hierarchy(rootData, d => d.children);
+
+    // y spacing based on number of leaves
+    const leaves = root.leaves().length;
+    const yScale = d3.scalePoint()
+      .domain(root.leaves().map((d, i) => i))
+      .range([0, innerH])
+      .padding(0.5);
+
+    // Assign y to tips, then interpolate y for internal nodes (average of children)
+    root.eachAfter(d => {
+      if (!d.children) {
+        d.y = yScale(d.parent ? d.parent.children.indexOf(d) : 0); // temp, will fix below
+      }
+    });
+    // Better: map leaf order explicitly
+    root.leaves().forEach((leaf, i) => { leaf.y = yScale(i); });
+    root.eachAfter(d => {
+      if (d.children) {
+        d.y = d3.mean(d.children, c => c.y);
+      }
+    });
+
+    // Compute cumulative x from branch lengths
+    addCumulativeLength(root.data, 0);
+    root.eachBefore(d => { d.data.cum = d.data.cum ?? 0; });
+
+    const maxCum = getMaxCum(root.data) || 1e-6;
+    const xScale = d3.scaleLinear().domain([0, maxCum]).range([0, innerW]);
+
+    // Set x via cumulative length
+    root.eachBefore(d => { d.x = xScale(d.data.cum || 0); });
+
+    // Links (straight or elbow)
+    const link = g.append("g").attr("class", "links")
+      .selectAll("path")
+      .data(root.links())
+      .join("path")
+      .attr("class", "link")
+      .attr("d", d => `M${d.source.x},${d.source.y}L${d.target.x},${d.target.y}`);
+
+    // Nodes
+    const node = g.append("g").attr("class", "nodes")
+      .selectAll("g")
+      .data(root.descendants())
+      .join("g")
+      .attr("transform", d => `translate(${d.x},${d.y})`)
+      .attr("class", d => d.children ? "node" : "node tip");
+
+    node.append("circle").attr("r", 3);
+
+    // Tip labels
+    node.filter(d => !d.children).append("text")
+      .attr("x", 6).attr("dy", "0.32em")
+      .text(d => d.data.name || "")
+      .style("fill", "#111827");
+
+    // X axis (branch length scale)
+    const axis = d3.axisTop(xScale).ticks(6);
+    g.append("g").attr("class", "axis").call(axis);
+
+    // Title
+    g.append("text")
+      .attr("x", 0).attr("y", -8)
+      .text(`Tree ${idx + 1}  ·  interval [${tinfo.start} , ${tinfo.end})`)
+      .style("font-weight", 600).style("font-size", "12px");
+  }
+
+  function updateHeader(idx) {
+    const t = trees[idx];
+    which.textContent = `Tree ${idx + 1} of ${trees.length}`;
+    posLabel.textContent = `[${t.start} , ${t.end})`;
+  }
+
+  // Initial draw
+  renderTree(0);
+
+  // Slider interactions
+  slider.addEventListener("input", (e) => {
+    const idx = +e.target.value;
+    updateHeader(idx);
+    renderTree(idx);
+  });
+
+  // Redraw on resize
+  window.addEventListener("resize", () => {
+    renderTree(+slider.value);
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ARG Visualization</title>
+  <script src="https://unpkg.com/cytoscape@3.23.0/dist/cytoscape.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #fafafa;
+      margin: 0;
+      overflow: hidden;
+    }
+    #cy {
+      width: 100vw;
+      height: 100vh;
+      border-top: 2px solid #333;
+    }
+    #legend {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 8px;
+      padding: 10px 15px;
+      font-size: 14px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .color-box {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      margin-right: 5px;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+  <div id="legend">
+    <strong>Legend:</strong><br>
+    <div><span class="color-box" style="background:#3cb44b"></span> Sample nodes (flags = 1)</div>
+    <div><span class="color-box" style="background:#999"></span> Ancestor nodes (flags = 0)</div>
+    <div><span class="color-box" style="background:#e6194b"></span> Recombination nodes (flags ≥ 131072)</div>
+  </div>
+
+  <div id="cy"></div>
+
+  <script>
+    async function drawARG() {
+      const response = await fetch("arg.json");
+      const data = await response.json();
+
+      // Convert nodes and edges into Cytoscape elements
+      const elements = [];
+
+      // Compute scaling factor for y-position (based on max time)
+      const maxTime = Math.max(...data.nodes.map(n => n.time));
+
+      data.nodes.forEach(n => {
+        let color = "#999";
+        if (n.flags === 1) color = "#3cb44b"; // sample
+        else if (n.flags >= 131072) color = "#e6194b"; // recombination
+
+        elements.push({
+          data: { id: String(n.id), time: n.time, flag: n.flags },
+          position: { x: n.id * 60, y: (1 - n.time / maxTime) * 600 },
+          style: { "background-color": color }
+        });
+      });
+
+      data.edges.forEach(e => {
+        elements.push({
+          data: {
+            id: "e" + e.id,
+            source: String(e.parent),
+            target: String(e.child),
+            left: e.left,
+            right: e.right
+          }
+        });
+      });
+
+      // Initialize Cytoscape
+      const cy = cytoscape({
+        container: document.getElementById("cy"),
+        elements: elements,
+        layout: {
+          name: "preset", // Use our pre-computed y positions
+          fit: true,
+          padding: 30
+        },
+        style: [
+          {
+            selector: "node",
+            style: {
+              width: 18,
+              height: 18,
+              "border-color": "#333",
+              "border-width": 1,
+              label: "data(id)",
+              "font-size": 10,
+              color: "#333",
+              "text-valign": "center",
+              "text-halign": "center"
+            }
+          },
+          {
+            selector: "edge",
+            style: {
+              width: 1.5,
+              "curve-style": "bezier",
+              "line-color": "#bbb",
+              "target-arrow-shape": "triangle",
+              "target-arrow-color": "#bbb"
+            }
+          }
+        ]
+      });
+
+      // Optional: on hover, show tooltip with metadata
+      cy.on("mouseover", "node", (evt) => {
+        const n = evt.target.data();
+        cy.container().title = `Node ${n.id}\nTime: ${n.time.toFixed(2)}\nFlags: ${n.flag}`;
+      });
+    }
+
+    drawARG();
+  </script>
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ARG Dashboard — Global ARG + Local Trees</title>
+<script src="https://unpkg.com/d3@7"></script>
+<script src="https://unpkg.com/cytoscape@3.23.0/dist/cytoscape.min.js"></script>
+<style>
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#fafafa;display:flex;flex-direction:column;height:100vh;}
+  header{background:#fff;padding:10px 20px;border-bottom:1px solid #ddd;display:flex;align-items:center;justify-content:space-between;}
+  .badge{background:#111827;color:#fff;padding:4px 8px;border-radius:8px;font-size:13px;}
+  #main{flex:1;display:flex;overflow:hidden;}
+  #cy{flex:1;position:relative;background:#fff;border-right:1px solid #ddd;}
+  #treepanel{flex:1;overflow:auto;background:#fafafa;padding:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;}
+  svg{width:100%;height:100%;}
+  .link{fill:none;stroke:#999;stroke-width:1.4px;}
+  .node circle{fill:#222;r:3;}
+  .axis text{font-size:10px;fill:#6b7280;}
+  .axis path,.axis line{stroke:#e5e7eb;}
+  .strip rect{rx:1;ry:1;}
+</style>
+</head>
+<body>
+<header>
+  <div><span class="badge">ARG + Local Trees</span></div>
+  <div id="info"></div>
+</header>
+<div id="main">
+  <div id="cy"></div>
+  <div id="treepanel"></div>
+</div>
+
+<script>
+(async function(){
+  const arg = await fetch("arg.json").then(r=>r.json());
+  const trees = await fetch("trees.json").then(r=>r.json());
+  const colors = d3.schemeSet2;
+  const maxTime = Math.max(...arg.nodes.map(n=>n.time));
+  const samples = arg.nodes.filter(n=>n.flags===1).sort((a,b)=>a.id-b.id);
+  const L = Math.max(...arg.edges.map(e=>e.right));
+
+  // Left panel — ARG with time scale
+  const xOrder = new Map(arg.nodes.map((n,i)=>[n.id,i]));
+  const cy = cytoscape({
+    container:document.getElementById("cy"),
+    elements:[
+      ...arg.nodes.map(n=>({
+        data:{id:String(n.id),time:n.time,flag:n.flags},
+        position:{x:xOrder.get(n.id)*50+60,y:(1-n.time/maxTime)*600+40}
+      })),
+      ...arg.edges.map(e=>({data:{
+        id:"e"+e.id,source:String(e.parent),target:String(e.child),
+        left:e.left,right:e.right
+      }}))
+    ],
+    layout:{name:"preset",fit:true,padding:40},
+    style:[
+      {selector:"node",style:{
+        width:16,height:16,"border-width":1,"border-color":"#333",
+        "background-color":el=>{
+          const f=el.data("flag");
+          if(f===1)return"#3cb44b";
+          if(f>=131072)return"#e6194b";
+          return"#999";
+        },
+        label:"data(id)","font-size":9,"text-valign":"center",color:"#111"
+      }},
+      {selector:"edge",style:{
+        width:1.2,"line-color":"#bbb","curve-style":"bezier",
+        "target-arrow-shape":"triangle","target-arrow-color":"#bbb"
+      }}
+    ]
+  });
+
+  // Genome color strips under samples (Panel A)
+  const strip = d3.select("#cy").append("svg")
+    .attr("class","strip")
+    .style("position","absolute").style("bottom","8px")
+    .style("left","40px").attr("width",700).attr("height",60);
+  samples.forEach((s,row)=>{
+    trees.forEach((t,i)=>{
+      strip.append("rect")
+        .attr("x",(t.start/L)*680)
+        .attr("y",row*12)
+        .attr("width",Math.max(1,(t.end-t.start)/L*680))
+        .attr("height",8)
+        .attr("fill",colors[i%colors.length]);
+    });
+    strip.append("text").attr("x",-20).attr("y",row*12+7)
+      .text(s.id).attr("font-size","10px").attr("fill","#444");
+  });
+
+  // Right panel — small multiples of trees (Panel B)
+  const panel = d3.select("#treepanel");
+  trees.forEach((t,i)=>{
+    const card = panel.append("div")
+      .style("background","#fff").style("border","1px solid #ddd")
+      .style("border-radius","8px").style("padding","8px");
+    card.append("div").style("font-weight","600")
+      .text(`Tree ${i+1}  [${t.start} , ${t.end})`)
+      .style("color",colors[i%colors.length]).style("margin-bottom","4px");
+
+    const w=240,h=160,margin=30;
+    const svg = card.append("svg").attr("width",w).attr("height",h);
+    const g = svg.append("g").attr("transform",`translate(${margin},${margin})`);
+
+    const tree = parseNewick(t.newick);
+    addCum(tree);const maxX=getMax(tree);
+    const root = d3.hierarchy(tree,d=>d.children);
+    const leaves=root.leaves();
+    const y=d3.scalePoint().domain(d3.range(leaves.length)).range([0,h-2*margin]).padding(0.5);
+    leaves.forEach((l,j)=>l.y=y(j));
+    root.eachAfter(d=>{if(d.children)d.y=d3.mean(d.children,c=>c.y);});
+    const x=d3.scaleLinear().domain([0,maxX]).range([0,w-2*margin]);
+    root.eachBefore(d=>d.x=x(d.data.cum));
+
+    g.selectAll("path.link").data(root.links()).join("path")
+      .attr("class","link").attr("stroke",colors[i%colors.length])
+      .attr("d",d=>`M${d.source.x},${d.source.y}L${d.target.x},${d.target.y}`);
+    const node=g.selectAll("g.node").data(root.descendants()).join("g")
+      .attr("transform",d=>`translate(${d.x},${d.y})`);
+    node.append("circle").attr("r",2.5).attr("fill","#222");
+    node.filter(d=>!d.children).append("text")
+      .attr("x",5).attr("dy","0.32em").text(d=>d.data.name||"")
+      .attr("font-size","9px");
+  });
+
+  // Highlight edges per interval color (Panel A)
+  arg.edges.forEach((e,i)=>{
+    const idx = trees.findIndex(t=>!(t.end<=e.left||t.start>=e.right));
+    const c = idx>=0?colors[idx%colors.length]:"#bbb";
+    cy.$id("e"+e.id).style("line-color",c).style("target-arrow-color",c);
+  });
+
+  // Utility functions
+  function parseNewick(s){
+    let tokens=s.trim().split(/(?=[(),:;])|(?<=[(),:;])/),i=0;
+    function eat(x){const t=tokens[i++];if(x&&t!==x)throw new Error("Expected "+x);return t;}
+    function parseN(){
+      let n={name:"",length:0,children:[]};
+      if(tokens[i]==="("){eat("(");n.children.push(parseN());
+        while(tokens[i]===","){eat(",");n.children.push(parseN());}
+        eat(")");}
+      else{while(i<tokens.length&&! ",):;".includes(tokens[i]))n.name+=tokens[i++];}
+      if(tokens[i]===":"){eat(":");let num="";while(i<tokens.length&&! ",);".includes(tokens[i]))num+=tokens[i++];n.length=+num;}
+      return n;
+    }
+    const r=parseN();eat(";");(function clean(x){if(!x.children.length)delete x.children;else x.children.forEach(clean);})(r);return r;
+  }
+  function addCum(n,p=0){n.cum=(n.length||0)+p;if(n.children)n.children.forEach(c=>addCum(c,n.cum));}
+  function getMax(n){let m=n.cum||0;if(n.children)n.children.forEach(c=>m=Math.max(m,getMax(c)));return m;}
+})();
+</script>
+</body>
+</html>

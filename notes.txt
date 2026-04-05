@@ -1,0 +1,11 @@
+You’ll see:
+
+Green nodes = current samples
+
+Gray = ancestors
+
+Red = recombination events
+
+Arrows point from parent → child
+
+Node height roughly corresponds to ancestry time

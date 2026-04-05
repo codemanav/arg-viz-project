@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ARG Visualization — Rasmussen 2014 Style</title>
+<script src="https://unpkg.com/d3@7"></script>
+<style>
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#fafafa;}
+  header{padding:10px 20px;border-bottom:1px solid #ddd;background:#fff;font-weight:600;}
+  #container{display:flex;flex-wrap:wrap;}
+  #argPanel{flex:1 1 55%;position:relative;padding:20px;}
+  #treesPanel{flex:1 1 45%;background:#fff;border-left:1px solid #ddd;padding:20px;overflow-x:auto;}
+  svg{width:100%;height:100%;}
+  .axis line,.axis path{stroke:#e5e7eb;}
+  .axis text{font-size:11px;fill:#444;}
+  .tree-title{text-anchor:middle;font-size:12px;font-weight:600;}
+  .recomb{stroke-dasharray:4 2;stroke:#444;stroke-width:1.3px;opacity:0.8;}
+  .interval-label{font-size:11px;font-weight:500;fill:#222;}
+</style>
+</head>
+<body>
+<header>ARG (Panel A) and Local Trees (Panel B) — Rasmussen 2014 Layout</header>
+<div id="container">
+  <div id="argPanel"><svg id="argSVG"></svg></div>
+  <div id="treesPanel"><svg id="treesSVG"></svg></div>
+</div>
+
+<script>
+(async function(){
+  const arg = await fetch("arg.json").then(r=>r.json());
+  const trees = await fetch("trees.json").then(r=>r.json());
+  const colors = d3.schemeSet2;
+  const argSvg = d3.select("#argSVG");
+  const w = document.getElementById("argPanel").clientWidth;
+  const h = 600;
+  argSvg.attr("width",w).attr("height",h);
+
+  // === Panel A: ARG schematic ===
+  const maxTime = d3.max(arg.nodes,d=>d.time);
+  const genomeLen = d3.max(arg.edges,d=>d.right);
+  const x = d3.scaleLinear().domain([0,genomeLen]).range([60,w-40]);
+  const y = d3.scaleLinear().domain([0,maxTime]).range([h-50,30]);
+
+  const yAxis = d3.axisLeft(y).ticks(6);
+  argSvg.append("g").attr("class","axis").attr("transform","translate(50,0)").call(yAxis);
+  argSvg.append("text").attr("x",10).attr("y",25)
+        .text("Generations before present").attr("font-size","11px");
+
+  const colorForEdge = e=>{
+    for(let i=0;i<trees.length;i++){
+      const t=trees[i];
+      if(!(e.right<=t.start||e.left>=t.end))return colors[i%colors.length];
+    }
+    return"#bbb";
+  };
+
+  const nodesById=new Map(arg.nodes.map(n=>[n.id,n]));
+
+  // Edges (colored verticals)
+  argSvg.append("g").selectAll("line.edge")
+    .data(arg.edges).join("line")
+      .attr("x1",d=>x((d.left+d.right)/2))
+      .attr("x2",d=>x((d.left+d.right)/2))
+      .attr("y1",d=>y(nodesById.get(d.parent).time))
+      .attr("y2",d=>y(nodesById.get(d.child).time))
+      .attr("stroke",d=>colorForEdge(d))
+      .attr("stroke-width",2)
+      .attr("stroke-linecap","round");
+
+  // Nodes
+  argSvg.append("g").selectAll("circle.node")
+    .data(arg.nodes).join("circle")
+      .attr("cx",d=>x(genomeLen/2))
+      .attr("cy",d=>y(d.time))
+      .attr("r",d=>d.flags===1?4:2.5)
+      .attr("fill",d=>d.flags===1?"#3cb44b":(d.flags>=131072?"#e6194b":"#555"))
+      .attr("stroke","#fff");
+
+  // Genome bars + interval labels
+  const samples=arg.nodes.filter(n=>n.flags===1).sort((a,b)=>a.id-b.id);
+  const barY=h-35, barH=8, barSpacing=12;
+  trees.forEach((t,i)=>{
+    const mid=(t.start+t.end)/2;
+    argSvg.append("text").attr("class","interval-label")
+      .attr("x",x(mid)).attr("y",barY-8)
+      .attr("text-anchor","middle")
+      .text("b"+(i+1))
+      .attr("fill",colors[i%colors.length]);
+  });
+  samples.forEach((s,row)=>{
+    trees.forEach((t,i)=>{
+      argSvg.append("rect")
+        .attr("x",x(t.start))
+        .attr("y",barY+row*barSpacing)
+        .attr("width",x(t.end)-x(t.start))
+        .attr("height",barH)
+        .attr("fill",colors[i%colors.length]);
+    });
+    argSvg.append("text").attr("x",30).attr("y",barY+row*barSpacing+barH-1)
+      .text(s.id).attr("font-size","10px").attr("fill","#444");
+  });
+
+  // Recombination connectors (dashed)
+  const recombNodes=arg.nodes.filter(n=>n.flags>=131072);
+  recombNodes.forEach(n=>{
+    const time=n.time;
+    const edgesFrom=arg.edges.filter(e=>e.parent===n.id);
+    if(edgesFrom.length>=2){
+      const xs=edgesFrom.map(e=>x((e.left+e.right)/2)).sort((a,b)=>a-b);
+      for(let i=0;i<xs.length-1;i++){
+        argSvg.append("line").attr("class","recomb")
+          .attr("x1",xs[i]).attr("x2",xs[i+1])
+          .attr("y1",y(time)).attr("y2",y(time)).lower();
+      }
+    }
+  });
+
+  // === Panel B: vertical trees laid horizontally ===
+  const treeSvg = d3.select("#treesSVG");
+  const wTot = document.getElementById("treesPanel").clientWidth;
+  const hTot = 280;
+  treeSvg.attr("width",wTot).attr("height",hTot);
+
+  const tWidth = (wTot - 80) / trees.length;
+  const marginTop = 30, marginBottom = 40;
+
+  trees.forEach((t,i)=>{
+    const group = treeSvg.append("g")
+      .attr("transform",`translate(${60 + i*tWidth},${marginTop})`);
+    const color = colors[i%colors.length];
+
+    // Parse tree
+    const tree=parseNewick(t.newick);
+    addCum(tree);const maxX=getMax(tree);
+    const root=d3.hierarchy(tree,d=>d.children);
+    const leaves=root.leaves();
+
+    const yScale=d3.scaleLinear()
+       .domain([0,maxX])
+       .range([0,tWidth-40]);  // tree width = branch length scale
+    const xScale=d3.scalePoint()
+       .domain(d3.range(leaves.length))
+       .range([0,hTot - marginTop - marginBottom])
+       .padding(0.5);
+
+    leaves.forEach((l,j)=>l.x=xScale(j));
+    root.eachAfter(d=>{if(d.children)d.x=d3.mean(d.children,c=>c.x);});
+    root.eachBefore(d=>d.y=yScale(d.data.cum));
+
+    // Branches (vertical)
+    group.selectAll("path.link").data(root.links()).join("path")
+      .attr("fill","none").attr("stroke",color).attr("stroke-width",1.6)
+      .attr("d",d=>`
+        M${d.source.y},${d.source.x}
+        L${d.source.y},${d.target.x}
+        L${d.target.y},${d.target.x}
+      `);
+
+    // Nodes
+    const node=group.selectAll("g.node").data(root.descendants()).join("g")
+      .attr("transform",d=>`translate(${d.y},${d.x})`);
+    node.append("circle").attr("r",2).attr("fill","#222");
+    node.filter(d=>!d.children).append("text")
+      .attr("x",4).attr("dy","0.32em").text(d=>d.data.name||"")
+      .attr("font-size","9px");
+
+    // Sample labels 1,2,3,4 below
+    const tipIDs = leaves.map(l=>l.data.name||"");
+    const labelY = hTot - marginBottom + 12;
+    tipIDs.forEach((lbl,j)=>{
+      group.append("text")
+        .attr("x",yScale(maxX/2))  // horizontally centered under tree
+        .attr("y",labelY)
+        .attr("text-anchor","middle")
+        .text(lbl)
+        .attr("font-size","10px");
+    });
+
+    // Interval label on top (b₁,b₂,...)
+    group.append("text")
+      .attr("x",(tWidth-40)/2)
+      .attr("y",-10)
+      .attr("text-anchor","middle")
+      .attr("font-size","12px")
+      .attr("fill",color)
+      .text("b"+(i+1));
+  });
+
+  // === Helpers ===
+  function parseNewick(s){
+    let tokens=s.trim().split(/(?=[(),:;])|(?<=[(),:;])/),i=0;
+    function eat(x){const t=tokens[i++];if(x&&t!==x)throw new Error("Expected "+x);return t;}
+    function parseN(){let n={name:"",length:0,children:[]};
+      if(tokens[i]==="("){eat("(");n.children.push(parseN());
+        while(tokens[i]===","){eat(",");n.children.push(parseN());}eat(")");}
+      else{while(i<tokens.length&&! ",):;".includes(tokens[i]))n.name+=tokens[i++];}
+      if(tokens[i]===":"){eat(":");let num="";while(i<tokens.length&&! ",);".includes(tokens[i]))num+=tokens[i++];n.length=+num;}
+      return n;}
+    const r=parseN();eat(";");(function clean(x){if(!x.children.length)delete x.children;else x.children.forEach(clean);})(r);return r;
+  }
+  function addCum(n,p=0){n.cum=(n.length||0)+p;if(n.children)n.children.forEach(c=>addCum(c,n.cum));}
+  function getMax(n){let m=n.cum||0;if(n.children)n.children.forEach(c=>m=Math.max(m,getMax(c)));return m;}
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ARG + Local Trees Visualization</title>
+<script src="https://unpkg.com/d3@7"></script>
+<script src="https://unpkg.com/cytoscape@3.23.0/dist/cytoscape.min.js"></script>
+
+<style>
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  header {
+    background: #fff;
+    padding: 10px 20px;
+    border-bottom: 1px solid #ddd;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .badge { background:#111827; color:#fff; padding:4px 8px; border-radius:8px; font-size:13px; }
+  .slider-container { display:flex; align-items:center; gap:10px; }
+  input[type=range] { width:240px; }
+  #main { display: flex; flex: 1; overflow: hidden; }
+  #cy, #treeviz { flex: 1; border-right: 1px solid #ddd; background: #fff; }
+  #treeviz { border-right: none; }
+  svg { width: 100%; height: 100%; }
+  .link { fill: none; stroke: #aaa; stroke-width: 1.5px; }
+  .node circle { fill: #1f2937; r: 3; }
+  #legend {
+    position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,0.9);
+    padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; line-height: 1.4;
+  }
+  #legend .color-box {
+    display: inline-block; width: 12px; height: 12px; margin-right: 6px; border: 1px solid #333;
+  }
+  #cy { position: relative; }
+</style>
+</head>
+<body>
+<header>
+  <div><span class="badge">ARG + Local Trees</span></div>
+  <div class="slider-container">
+    <label for="slider">Genomic tree index:</label>
+    <input id="slider" type="range" min="0" value="0" step="1" />
+    <span id="interval"></span>
+  </div>
+</header>
+
+<div id="main">
+  <div id="cy">
+    <div id="legend">
+      <strong>Legend:</strong><br>
+      <div><span class="color-box" style="background:#3cb44b"></span> Sample nodes</div>
+      <div><span class="color-box" style="background:#999"></span> Ancestor nodes</div>
+      <div><span class="color-box" style="background:#e6194b"></span> Recombination nodes</div>
+    </div>
+  </div>
+  <div id="treeviz"></div>
+</div>
+
+<script>
+(async function () {
+
+  const arg = await fetch("arg.json").then(r => r.json());
+  const trees = await fetch("trees.json").then(r => r.json());
+
+  const slider = document.getElementById("slider");
+  const intervalLabel = document.getElementById("interval");
+  slider.max = trees.length - 1;
+  intervalLabel.textContent = `[${trees[0].start}, ${trees[0].end})`;
+
+  // --- ARG DENDROGRAM LAYOUT (instead of cytoscape auto layout) ---
+
+  const childMap = {};
+  arg.nodes.forEach(n => childMap[n.id] = []);
+  arg.edges.forEach(e => childMap[e.parent].push(e.child));
+
+  const hasParent = new Set(arg.edges.map(e => e.child));
+  const rootId = arg.nodes.find(n => !hasParent.has(n.id)).id;
+
+  function build(id) {
+    return { name: id, children: childMap[id].map(build) };
+  }
+
+  const argRoot = d3.hierarchy(build(rootId));
+  const cluster = d3.cluster().size([800, 400]); // adjust size if needed
+  cluster(argRoot);
+
+  const argPositions = {};
+  argRoot.descendants().forEach(d => {
+    argPositions[d.data.name] = { x: d.y, y: d.x };
+  });
+
+  // --- CYTOSCAPE WITH PRESET POSITIONS (DENDROGRAM) ---
+
+  const cy = cytoscape({
+    container: document.getElementById("cy"),
+    elements: [
+      ...arg.nodes.map(n => ({
+        data: { id: n.id.toString(), flag: n.flags },
+        position: argPositions[n.id]
+      })),
+      ...arg.edges.map(e => ({
+        data: { id: "e" + e.id, source: e.parent.toString(), target: e.child.toString(), left: e.left, right: e.right }
+      }))
+    ],
+    layout: { name: "preset" },
+    style: [
+      {
+        selector: "node",
+        style: {
+          width: 16, height: 16,
+          "border-color": "#333", "border-width": 1,
+          "background-color": ele => {
+            const f = ele.data("flag");
+            if (f === 1) return "#3cb44b";
+            if (f >= 131072) return "#e6194b";
+            return "#999";
+          },
+          label: "data(id)",
+          "font-size": 9, "text-valign": "center", color: "#222"
+        }
+      },
+      {
+        selector: "edge",
+        style: {
+          width: 1.2,
+          "line-color": "#bbb",
+          "target-arrow-shape": "triangle",
+          "target-arrow-color": "#bbb",
+          "curve-style": "bezier"
+        }
+      }
+    ]
+  });
+
+  // --- TREE PANEL (RIGHT PANEL) → VERTICAL DENDROGRAM ---
+
+  const container = document.getElementById("treeviz");
+  const svg = d3.select(container).append("svg");
+  const g = svg.append("g").attr("transform", "translate(60,20)");
+
+  function size() {
+    const w = container.clientWidth, h = container.clientHeight;
+    svg.attr("width", w).attr("height", h);
+    return { innerW: w - 100, innerH: h - 60 };
+  }
+
+  function parseNewick(s) {
+    let tokens = s.trim().split(/(?=[(),:;])|(?<=[(),:;])/), i = 0;
+    function eat(x){const t=tokens[i++];return t;}
+    function parseNode(){
+      let n={name:"",children:[]};
+      if(tokens[i]=="("){
+        eat("("); n.children.push(parseNode());
+        while(tokens[i]==","){eat(",");n.children.push(parseNode());}
+        eat(")");
+      } else {
+        while(i<tokens.length && !",):;".includes(tokens[i])) n.name+=tokens[i++];
+      }
+      eat(tokens[i]==":"?":":tokens[i]); while(i<tokens.length && !",);".includes(tokens[i])) i++;
+      return n;
+    }
+    const root=parseNode(); return root;
+  }
+
+  function drawTree(idx) {
+    const t = trees[idx];
+    intervalLabel.textContent = `[${t.start}, ${t.end})`;
+    const { innerW, innerH } = size();
+    g.selectAll("*").remove();
+
+    const rootData = parseNewick(t.newick);
+    const root = d3.hierarchy(rootData);
+
+    const cluster = d3.cluster().size([innerH, innerW]);
+    cluster(root);
+
+    g.selectAll("path.link")
+      .data(root.links())
+      .join("path")
+      .attr("stroke", "#555")
+      .attr("fill", "none")
+      .attr("d", d => `
+        M${d.source.y},${d.source.x}
+        L${d.source.y},${d.target.x}
+        L${d.target.y},${d.target.x}
+      `);
+
+    g.selectAll("circle.node")
+      .data(root.descendants())
+      .join("circle")
+      .attr("cx", d => d.y)
+      .attr("cy", d => d.x)
+      .attr("r", 3)
+      .attr("fill", d => d.children ? "#333" : "#1f77b4");
+
+    g.selectAll("text.label")
+      .data(root.leaves())
+      .join("text")
+      .attr("x", d => d.y + 6)
+      .attr("y", d => d.x)
+      .attr("dy", "0.32em")
+      .style("font-size","11px")
+      .text(d => d.data.name || "");
+  }
+
+  drawTree(0);
+
+  slider.addEventListener("input", e => {
+    const idx = +e.target.value;
+    drawTree(idx);
+    const t = trees[idx];
+    cy.edges().forEach(edge => {
+      const l = edge.data("left"), r = edge.data("right");
+      const active = !(r < t.start || l > t.end);
+      edge.style("line-color", active ? "#0070f3" : "#bbb");
+      edge.style("target-arrow-color", active ? "#0070f3" : "#bbb");
+    });
+  });
+
+})();
+</script>
+</body>
+</html>
