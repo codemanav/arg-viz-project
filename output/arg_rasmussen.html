@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ARG Visualization — Rasmussen et al. Style</title>
+<script src="https://unpkg.com/d3@7"></script>
+<style>
+* { box-sizing: border-box; margin: 0; }
+body {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  background: #fff;
+  padding: 24px 24px 48px;
+  max-width: 880px;
+  margin: auto;
+}
+svg { display: block; overflow: visible; }
+.panel-label  { font-size: 22px; font-weight: 700; fill: #111; }
+.time-grid    { stroke: #ccc; stroke-dasharray: 5 3; stroke-width: 0.7; }
+.time-label   { font-size: 9px; fill: #999; font-style: italic; }
+.sample-label { font-size: 13px; font-weight: 600; fill: #222; }
+.axis text    { font-size: 10px; fill: #555; }
+.axis path,
+.axis line    { stroke: #aaa; }
+.tree-title   { font-size: 13px; font-weight: 700; }
+.interval-lbl { font-size: 9px; fill: #666; }
+.bp-label     { font-size: 9px; fill: #444; }
+.formula      { font-size: 14px; font-weight: 600; font-style: italic; fill: #333; }
+.legend-text  { font-size: 10px; fill: #444; }
+</style>
+</head>
+<body>
+<div id="panel-a"></div>
+<div id="panel-b" style="margin-top:12px"></div>
+
+<script>
+(async function () {
+
+  /* ================================================================
+     CONFIGURATION
+     ================================================================ */
+  const W      = 820;
+  const LW     = 3;
+  const LG     = 1.5;
+  const COLORS = ["#c0392b","#27ae60","#2980b9","#8e44ad","#e67e22","#16a085"];
+
+  /* ================================================================
+     HELPERS
+     ================================================================ */
+  const SUB = "₀₁₂₃₄₅₆₇₈₉";
+  const SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+  const toSub = n => String(n).split("").map(d => SUB[+d]).join("");
+  const toSup = n => String(n).split("").map(d => SUP[+d]).join("");
+
+  /* ================================================================
+     DATA
+     ================================================================ */
+  const arg   = await fetch("arg.json").then(r => r.json());
+  const nMap  = new Map(arg.nodes.map(n => [n.id, {...n}]));
+  const samples = arg.nodes.filter(n => n.flags === 1).sort((a,b) => a.id - b.id);
+  const N     = samples.length;
+  const tMax  = Math.max(...arg.nodes.map(n => n.time));
+
+  // Derive genomic breakpoints & segments from edge intervals
+  const bpSet = new Set();
+  arg.edges.forEach(e => { bpSet.add(e.left); bpSet.add(e.right); });
+  const bps = [...bpSet].sort((a,b) => a - b);
+  const L   = bps[bps.length - 1];
+
+  const segs = [];
+  for (let i = 0; i < bps.length - 1; i++)
+    segs.push({ s: bps[i], e: bps[i+1], i });
+  const S = segs.length;
+
+  // Parallel‑line bundle geometry
+  const bundleW = S * LW + Math.max(0, S - 1) * LG;
+  const segOff  = si => -bundleW / 2 + si * (LW + LG) + LW / 2;
+
+  /* ================================================================
+     PER-SEGMENT LAYOUT
+     For each genomic segment, extract the active edges (one local
+     tree) and assign x-positions to every node in that tree.
+     Samples stay at fixed x; internal nodes sit at the mean of
+     their children.
+     ================================================================ */
+  segs.forEach(seg => {
+    seg.edges = arg.edges.filter(e =>
+      e.left <= seg.s + 1e-9 && e.right >= seg.e - 1e-9
+    );
+
+    const ch = {};
+    seg.edges.forEach(e => (ch[e.parent] ??= []).push(e.child));
+
+    const xp = {};
+    samples.forEach((s, i) => { xp[s.id] = i + 1; });
+
+    const ids = new Set();
+    seg.edges.forEach(e => { ids.add(e.parent); ids.add(e.child); });
+
+    [...ids]
+      .map(id => nMap.get(id))
+      .sort((a, b) => a.time - b.time)
+      .forEach(n => {
+        if (xp[n.id] !== undefined) return;
+        const kids = (ch[n.id] || []).map(c => xp[c]).filter(v => v !== undefined);
+        if (kids.length) xp[n.id] = d3.mean(kids);
+      });
+
+    seg.xp = xp;
+  });
+
+  /* ================================================================
+     PANEL A  —  Full ARG
+     ================================================================ */
+  const mA = { t: 38, r: 55, b: 102, l: 78 };
+  const pW = W - mA.l - mA.r;
+  const pH = 400;
+  const hA = pH + mA.t + mA.b;
+
+  const xA = d3.scaleLinear().domain([0.25, N + 0.75]).range([0, pW]);
+  // sqrt scale compresses long branches, keeping early events visible
+  const yA = d3.scaleSqrt().domain([0, tMax * 1.08]).range([pH, 0]);
+
+  const svgA = d3.select("#panel-a").append("svg")
+    .attr("width", W).attr("height", hA);
+
+  svgA.append("text").attr("x", 14).attr("y", 28)
+    .attr("class", "panel-label").text("A");
+
+  svgA.append("text")
+    .attr("x", W - mA.r).attr("y", mA.t + 22)
+    .attr("text-anchor", "end").attr("class", "formula")
+    .text(`G${toSup(N)}`);
+
+  const gA = svgA.append("g")
+    .attr("transform", `translate(${mA.l},${mA.t})`);
+
+  // ── Y-axis ──
+  const eventT = [...new Set(
+    arg.nodes.filter(n => n.time > 0).map(n => n.time)
+  )].sort((a, b) => a - b);
+
+  gA.append("g").attr("class", "axis")
+    .call(d3.axisLeft(yA)
+      .tickValues(eventT)
+      .tickFormat(d3.format(".0f")));
+
+  svgA.append("text")
+    .attr("transform", "rotate(-90)")
+    .attr("x", -(mA.t + pH / 2)).attr("y", 15)
+    .attr("text-anchor", "middle")
+    .style("font-size", "11px").style("fill", "#555")
+    .text("Generations before present");
+
+  // ── Dashed time gridlines + tᵢ labels ──
+  eventT.forEach((t, i) => {
+    gA.append("line").attr("class", "time-grid")
+      .attr("x1", -5).attr("x2", pW)
+      .attr("y1", yA(t)).attr("y2", yA(t));
+
+    gA.append("text").attr("class", "time-label")
+      .attr("x", pW + 8).attr("y", yA(t)).attr("dy", "0.35em")
+      .text(`t${toSub(i + 1)}`);
+  });
+
+  // ── Edges: colored orthogonal connectors ──
+  // Each segment draws its own set of lines; the global offset keeps
+  // parallel strands for the same edge visually ordered left→right
+  // matching the genomic order of segments.
+  segs.forEach(seg => {
+    arg.edges.forEach(edge => {
+      if (edge.left > seg.s + 1e-9 || edge.right < seg.e - 1e-9) return;
+
+      const cx_ = seg.xp[edge.child];
+      const px_ = seg.xp[edge.parent];
+      if (cx_ == null || px_ == null) return;
+
+      const cx = xA(cx_), px = xA(px_);
+      const cy = yA(nMap.get(edge.child).time);
+      const py = yA(nMap.get(edge.parent).time);
+      const o  = segOff(seg.i);
+
+      gA.append("path")
+        .attr("d", `M${cx + o},${cy} L${cx + o},${py} L${px + o},${py}`)
+        .attr("fill", "none")
+        .attr("stroke", COLORS[seg.i % COLORS.length])
+        .attr("stroke-width", LW)
+        .attr("stroke-linecap", "round")
+        .attr("stroke-linejoin", "round");
+    });
+  });
+
+  // ── Sample node markers ──
+  samples.forEach((s, i) => {
+    const cx = xA(i + 1), cy = yA(0);
+
+    gA.append("circle")
+      .attr("cx", cx).attr("cy", cy).attr("r", 5.5)
+      .attr("fill", "#3cb44b").attr("stroke", "#2d7d32")
+      .attr("stroke-width", 1.3);
+
+    gA.append("text")
+      .attr("x", cx).attr("y", cy + 18)
+      .attr("text-anchor", "middle").attr("class", "sample-label")
+      .text(i + 1);
+
+    // Genome color bar
+    const bw = 50, bh = 10, by = cy + 26;
+    segs.forEach(seg => {
+      const sx = (seg.s / L) * bw;
+      const sw = ((seg.e - seg.s) / L) * bw;
+      gA.append("rect")
+        .attr("x", cx - bw / 2 + sx).attr("y", by)
+        .attr("width", sw).attr("height", bh)
+        .attr("fill", COLORS[seg.i])
+        .attr("stroke", "#444").attr("stroke-width", 0.5);
+    });
+
+    // Breakpoint tick-marks on each bar
+    bps.slice(1, -1).forEach((bp, bi) => {
+      const tx = cx - bw / 2 + (bp / L) * bw;
+      gA.append("text")
+        .attr("x", tx).attr("y", by + bh + 10)
+        .attr("text-anchor", "middle")
+        .style("font-size", "7px").style("fill", "#666")
+        .text(`b${toSub(bi + 2)}`);
+    });
+  });
+
+  // ── Central genome ruler with breakpoint labels ──
+  const ry = yA(0) + 56;
+  const rw = pW * 0.44;
+  const rx = pW / 2 - rw / 2;
+  const rh = 12;
+
+  segs.forEach(seg => {
+    const sx = (seg.s / L) * rw;
+    const sw = ((seg.e - seg.s) / L) * rw;
+    gA.append("rect")
+      .attr("x", rx + sx).attr("y", ry)
+      .attr("width", sw).attr("height", rh)
+      .attr("fill", COLORS[seg.i])
+      .attr("stroke", "#444").attr("stroke-width", 0.5);
+  });
+
+  bps.forEach((bp, i) => {
+    const x = rx + (bp / L) * rw;
+    gA.append("line")
+      .attr("x1", x).attr("x2", x)
+      .attr("y1", ry - 2).attr("y2", ry + rh + 4)
+      .attr("stroke", "#333").attr("stroke-width", 0.8);
+
+    const first = i === 0;
+    const last  = i === bps.length - 1;
+    gA.append("text").attr("class", "bp-label")
+      .attr("x", x).attr("y", ry + rh + 15)
+      .attr("text-anchor", first ? "start" : last ? "end" : "middle")
+      .text(first ? `b${toSub(1)}=0`
+           : last  ? `b${toSub(i + 1)}=L`
+           : `b${toSub(i + 1)}`);
+  });
+
+  // ── Legend ──
+  const lgX = pW - 10, lgY = pH - 8;
+  const lgItems = [
+    { color: "#3cb44b", label: "Sample" },
+    { color: "#888",    label: "Coalescent" },
+    { color: "#e6194b", label: "Recombination" },
+  ];
+  lgItems.forEach((it, i) => {
+    gA.append("rect")
+      .attr("x", lgX - 80).attr("y", lgY - i * 16)
+      .attr("width", 10).attr("height", 10).attr("rx", 2)
+      .attr("fill", it.color);
+    gA.append("text").attr("class", "legend-text")
+      .attr("x", lgX - 65).attr("y", lgY - i * 16 + 9)
+      .text(it.label);
+  });
+
+  // ── Internal node markers (subtle) ──
+  arg.nodes.filter(n => n.flags !== 1).forEach(n => {
+    const xs = segs.map(s => s.xp[n.id]).filter(v => v != null);
+    if (!xs.length) return;
+    const cx = xA(d3.mean(xs));
+    const cy = yA(n.time);
+    const isRec = n.flags >= 131072;
+
+    gA.append(isRec ? "rect" : "circle")
+      .attr(isRec ? "x"  : "cx", isRec ? cx - 3 : cx)
+      .attr(isRec ? "y"  : "cy", isRec ? cy - 3 : cy)
+      .attr(isRec ? "width"  : "r", isRec ? 6 : 3)
+      .attr(isRec ? "height" : "r", isRec ? 6 : 3)
+      .attr("rx", isRec ? 1 : 0)
+      .attr("fill", isRec ? "#e6194b" : "#888")
+      .attr("stroke", isRec ? "#900" : "#555")
+      .attr("stroke-width", 0.7);
+  });
+
+  /* ================================================================
+     PANEL B  —  Local Trees  (one per genomic segment)
+     ================================================================ */
+  const mB  = { t: 45, r: 55, b: 60, l: 78 };
+  const bW  = W - mB.l - mB.r;
+  const bH  = 210;
+  const hB  = bH + mB.t + mB.b;
+  const tGap = 34;
+  const tw   = (bW - (S - 1) * tGap) / S;
+
+  const svgB = d3.select("#panel-b").append("svg")
+    .attr("width", W).attr("height", hB);
+
+  svgB.append("text").attr("x", 14).attr("y", 28)
+    .attr("class", "panel-label").text("B");
+
+  svgB.append("text")
+    .attr("x", W / 2).attr("y", 28)
+    .attr("text-anchor", "middle").attr("class", "formula")
+    .text(`G${toSup(N)} = (T${toSup(N)}, R${toSup(N)})`);
+
+  const gB = svgB.append("g")
+    .attr("transform", `translate(${mB.l},${mB.t})`);
+
+  // Shared y-scale (same sqrt transform as Panel A)
+  const yB = d3.scaleSqrt().domain([0, tMax * 1.08]).range([bH, 0]);
+
+  segs.forEach((seg, si) => {
+    const gT = gB.append("g")
+      .attr("transform", `translate(${si * (tw + tGap)},0)`);
+
+    const xT = d3.scaleLinear().domain([0.0, N + 1]).range([0, tw]);
+
+    // ── Title  Tᵢᴺ ──
+    gT.append("text").attr("class", "tree-title")
+      .attr("x", tw / 2).attr("y", -12)
+      .attr("text-anchor", "middle")
+      .attr("fill", COLORS[si])
+      .text(`T${toSub(si + 1)}${toSup(N)}`);
+
+    // ── Edges ──
+    seg.edges.forEach(edge => {
+      const cx_ = seg.xp[edge.child];
+      const px_ = seg.xp[edge.parent];
+      if (cx_ == null || px_ == null) return;
+
+      const cx = xT(cx_), px = xT(px_);
+      const cy = yB(nMap.get(edge.child).time);
+      const py = yB(nMap.get(edge.parent).time);
+
+      gT.append("path")
+        .attr("d", `M${cx},${cy} L${cx},${py} L${px},${py}`)
+        .attr("fill", "none")
+        .attr("stroke", COLORS[si])
+        .attr("stroke-width", 2)
+        .attr("stroke-linecap", "round")
+        .attr("stroke-linejoin", "round");
+    });
+
+    // ── Tip markers + labels ──
+    samples.forEach((s, i) => {
+      gT.append("circle")
+        .attr("cx", xT(i + 1)).attr("cy", yB(0)).attr("r", 3.5)
+        .attr("fill", COLORS[si]);
+
+      gT.append("text")
+        .attr("x", xT(i + 1)).attr("y", yB(0) + 14)
+        .attr("text-anchor", "middle")
+        .style("font-size", "10px").style("font-weight", "600")
+        .text(i + 1);
+    });
+
+    // ── Interval label ──
+    gT.append("text").attr("class", "interval-lbl")
+      .attr("x", tw / 2).attr("y", bH + 28)
+      .attr("text-anchor", "middle")
+      .text(`[${seg.s.toFixed(0)}, ${seg.e.toFixed(0)})`);
+
+    // ── Arrow → and recombination label Rᵢᴺ between trees ──
+    if (si < S - 1) {
+      const mx = tw + tGap / 2;
+      gT.append("text")
+        .attr("x", mx).attr("y", bH / 2 - 8)
+        .attr("text-anchor", "middle")
+        .style("font-size", "18px").style("fill", "#bbb")
+        .text("→");
+
+      gT.append("text")
+        .attr("x", mx).attr("y", bH / 2 + 12)
+        .attr("text-anchor", "middle")
+        .style("font-size", "11px").style("fill", "#e6194b")
+        .style("font-style", "italic")
+        .text(`R${toSub(si + 2)}${toSup(N)}`);
+    }
+  });
+
+  // ── Genome ruler below Panel B trees ──
+  const gbY = bH + 40, gbH = 8;
+  segs.forEach(seg => {
+    const sx = (seg.s / L) * bW;
+    const sw = ((seg.e - seg.s) / L) * bW;
+    gB.append("rect")
+      .attr("x", sx).attr("y", gbY)
+      .attr("width", sw).attr("height", gbH)
+      .attr("fill", COLORS[seg.i])
+      .attr("stroke", "#444").attr("stroke-width", 0.5);
+  });
+
+  bps.forEach((bp, i) => {
+    const x     = (bp / L) * bW;
+    const first = i === 0;
+    const last  = i === bps.length - 1;
+    gB.append("text").attr("class", "bp-label")
+      .attr("x", x).attr("y", gbY + gbH + 13)
+      .attr("text-anchor", first ? "start" : last ? "end" : "middle")
+      .text(first ? `b${toSub(1)}=0`
+           : last  ? `b${toSub(i + 1)}=L`
+           : `b${toSub(i + 1)}`);
+  });
+
+})();
+</script>
+</body>
+</html>
